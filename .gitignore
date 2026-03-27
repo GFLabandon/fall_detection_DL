@@ -1,52 +1,33 @@
-# PyCharm / IDE
+# ===== IDE =====
 .idea/
 *.iml
-*.iws
-*.ipr
 
-# Python
+# ===== Python =====
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
 
-# Virtualenv
+# ===== Virtual Env =====
 venv/
 env/
 ENV/
 
-# OS
+# ===== OS =====
 .DS_Store
 Thumbs.db
 
-# Logs，忽略本地生成的日志
+# ===== Logs =====
 logs/
 *.log
 
-# 忽略环境变量文件
+# ===== Env =====
 .env
 
-
+# ===== Models / Large Files =====
 *.task
 *.pt
 *.pth
 *.onnx
+
+# ===== Optional runtime data =====
+*.csv
