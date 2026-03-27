@@ -1,33 +1,74 @@
-# ===== Pycharm/IDE =====
+# ===== IDE / 编辑器 =====
 .idea/
 *.iml
+.vscode/
+*.swp
+*.swo
 
-# ===== Python =====
+# ===== Python 缓存 =====
 __pycache__/
 *.py[cod]
 *.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# ===== Virtual Env =====
+# ===== 虚拟环境 =====
 venv/
 env/
 ENV/
+.venv/
 
-# ===== OS =====
+# ===== 操作系统 =====
 .DS_Store
 Thumbs.db
+*.DS_Store
 
-# ===== Logs =====
+# ===== 日志 & 临时文件 =====
 logs/
 *.log
+*.tmp
 
-# ===== Env =====
+# ===== 环境变量 =====
 .env
+.env.local
+.env.*.local
 
-# ===== Models / Large Files =====
+# ===== 模型 / 大文件（重点！） =====
 *.task
 *.pt
 *.pth
 *.onnx
+*.h5
+*.pb
+*.tflite
+*.trt
+*.engine
 
-# ===== Optional runtime data =====
+# ===== 数据集 & 运行时文件 =====
+data/
+dataset/
 *.csv
+*.jpg
+*.png
+*.mp4
+*.avi
+
+# ===== 项目特定 =====
+models/          # 建议把模型全放在这里，不入库
+fall_det/        # 如果是虚拟环境文件夹
+*.pkl
+*.npy
