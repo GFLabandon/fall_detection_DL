@@ -25,7 +25,7 @@ from config import (
     LSTM_FALL_THRESHOLD, ASPECT_RATIO_THRESHOLD, BODY_ANGLE_THRESHOLD,
     LOG_DIR,
 )
-from models.lstm_fall_classifier import LSTMFallClassifier
+from models.lstm_classifier import LSTMFallClassifier
 from data.dataset import load_dataset
 
 
