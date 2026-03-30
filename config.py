@@ -15,7 +15,7 @@ EMAIL_ENABLED   = os.getenv("EMAIL_ENABLED", "false").lower() == "true"
 EMAIL_SENDER    = os.getenv("EMAIL_SENDER",    "")
 EMAIL_PASSWORD  = os.getenv("EMAIL_PASSWORD",  "")
 EMAIL_RECEIVER  = os.getenv("EMAIL_RECEIVER",  "")
-EMAIL_SMTP_HOST = os.getenv("EMAIL_SMTP_HOST", "smtp.163.com")
+EMAIL_SMTP_HOST = os.getenv("EMAIL_SMTP_HOST", "smtp.qq.com")
 EMAIL_SMTP_PORT = int(os.getenv("EMAIL_SMTP_PORT", "465"))
 
 # ============================================================
