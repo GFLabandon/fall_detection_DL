@@ -1,6 +1,17 @@
 # ===== Pycharm/IDE =====
 .idea/
 *.iml
+.vscode/
+*.swp
+*.swo
+
+# 数据集原始文件（体积过大）
+data/raw/
+data/processed/
+
+# 训练好的模型权重（体积过大，通过 train.py 本地生成）
+weights/*.pth
+weights/*.pt
 
 # ===== Python =====
 __pycache__/
@@ -8,17 +19,22 @@ __pycache__/
 *.so
 
 # ===== Virtual Env =====
+.venv/
 venv/
 env/
 ENV/
 
 # ===== OS =====
 .DS_Store
+.AppleDouble
+.LSOverride
 Thumbs.db
 
 # ===== Logs =====
 logs/
 *.log
+logs/*.csv
+logs/*.txt
 
 # ===== Env =====
 .env
@@ -31,3 +47,16 @@ logs/
 
 # ===== Optional runtime data =====
 *.csv
+
+# Python 包元数据
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Jupyter Notebook 检查点
+.ipynb_checkpoints/
+
+# 临时文件
+*.tmp
+*.bak
