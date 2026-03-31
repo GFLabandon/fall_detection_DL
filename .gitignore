@@ -10,7 +10,8 @@ data/raw/
 data/processed/
 
 # 训练好的模型权重（体积过大，通过 train.py 本地生成）
-weights/*.pth
+weights/
+*.pth
 weights/*.pt
 
 # ===== Python =====
