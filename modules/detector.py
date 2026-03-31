@@ -91,7 +91,7 @@ class FallDetector:
             print(f"   运行 python data/collect.py + python train.py 可训练模型")
             return None
         try:
-            from models.lstm_fall_classifier import LSTMFallClassifier
+            from models.lstm_classifier import LSTMFallClassifier
             ckpt  = torch.load(MODEL_WEIGHTS, map_location=self.device)
             cfg   = ckpt.get("config", {})
             model = LSTMFallClassifier(
