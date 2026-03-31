@@ -290,6 +290,13 @@ def main():
         "--max_adl", type=int, default=None,
         help="最多处理多少个日常活动序列（不指定则全部处理，调试用）"
     )
+    # ================== 新增：自定义路径（通用性） ==================
+    parser.add_argument(
+        "--raw-dir", type=str, default=None,
+        help="自定义 raw 数据目录（覆盖 config.py）")
+    parser.add_argument(
+        "--processed-dir", type=str, default=None,
+        help="自定义 processed 输出目录")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -333,7 +340,7 @@ def main():
         n_fall   = sum(labels)
         n_normal = len(labels) - n_fall
         tqdm.write(f"  {name}: {len(load_frames(path))}帧 → {len(windows)}个窗口 "
-                   f"(跌倒={n_fall}, 起身={n_normal})")
+                   f"(跌倒={n_fall}, 正常={n_normal})") # ← 修复：起身 → 正常
         all_X.extend(windows)
         all_y.extend(labels)
 
@@ -361,6 +368,7 @@ def main():
     # ---- 保存 ----
     os.makedirs(PROCESSED_DIR, exist_ok=True)
     output_path = TRAIN_DATA_FILE
+    #output_path = os.path.join(processed_dir, "fall_sequences.npz")  # 使用动态目录
     np.savez(output_path, X=X, y=y)
 
     print()
