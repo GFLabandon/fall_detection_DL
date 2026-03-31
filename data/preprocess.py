@@ -8,6 +8,7 @@
 # 使用方式：
 #   python data/preprocess.py                    # 处理全部序列
 #   python data/preprocess.py --max_fall 10 --max_adl 10  # 快速验证用
+# URFD 数据集预处理脚本（已全面优化：路径配置化 + 跨平台 + 自定义参数 + 任意目录运行）
 
 import argparse
 import os
@@ -27,22 +28,24 @@ from config import (
     FEATURE_DIM,
     MP_MODEL_COMPLEXITY,
     TRAIN_DATA_FILE,
+    RAW_DIR,           # ← 新增
+    PROCESSED_DIR,     # ← 新增
 )
 from data.extractor import FeatureExtractor
 
 
 # ============================================================
-#  常量
+#  常量（路径已移到 config.py，仅保留非路径常量）
 # ============================================================
-RAW_DIR        = "data/raw"
-PROCESSED_DIR  = "data/processed"
+#RAW_DIR        = "data/raw"
+#PROCESSED_DIR  = "data/processed"
 FRAME_STRIDE   = 2     # 帧采样步长（每隔1帧取1帧，约15fps）
 WINDOW_STRIDE  = 5     # 滑动窗口步长（每5帧生成一个新样本）
 MAX_FILL_FRAMES= 10    # 连续前向填充超过此帧数则丢弃该窗口
 
 
 # ============================================================
-#  工具函数
+#  工具函数（全部使用 os.path.join，跨平台）
 # ============================================================
 
 def scan_sequences(raw_dir: str):
