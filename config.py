@@ -88,3 +88,11 @@ LOG_FILE = "logs/fall_events.csv"
 FONT_SIZE_LARGE  = 40
 FONT_SIZE_NORMAL = 30
 FONT_SIZE_SMALL  = 22
+
+# ====================== 项目路径配置（统一管理） ======================
+# 项目根目录：基于 config.py 文件位置自动计算（任意目录运行都正确）
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+RAW_DIR = os.path.join(PROJECT_ROOT, "data", "raw")
+PROCESSED_DIR = os.path.join(PROJECT_ROOT, "data", "processed")
+TRAIN_DATA_FILE = os.path.join(PROCESSED_DIR, "fall_sequences.npz")
