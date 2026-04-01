@@ -38,5 +38,5 @@ plt.legend()
 
 plt.tight_layout()
 plt.savefig(OUTPUT_PNG, dpi=300, bbox_inches="tight")
-print(f"✅ 训练曲线已保存至 {OUTPUT_PNG}（可直接放入答辩 PPT）")
+print(f"✅ 训练曲线已保存至 {OUTPUT_PNG}")
 print(f"   最优 Epoch: {df.loc[df['val_loss'].idxmin(), 'epoch']}  val_acc={df['val_acc'].max():.1f}%")
