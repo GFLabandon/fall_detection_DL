@@ -148,15 +148,15 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入 163 邮箱的 SMTP 授权码
+# 编辑 .env，填入 qq 邮箱的 SMTP 授权码
 ```
 
 ```env
 EMAIL_ENABLED=true
-EMAIL_SENDER=your@163.com
+EMAIL_SENDER=your@qq.com
 EMAIL_PASSWORD=your_smtp_auth_code
 EMAIL_RECEIVER=family@example.com
-EMAIL_SMTP_HOST=smtp.163.com
+EMAIL_SMTP_HOST=smtp.qq.com
 EMAIL_SMTP_PORT=465
 ```
 
