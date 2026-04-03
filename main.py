@@ -20,6 +20,8 @@ import threading
 
 import mediapipe as mp
 import numpy as np
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # 确保从项目根目录导入
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
