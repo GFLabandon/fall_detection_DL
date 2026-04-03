@@ -129,12 +129,18 @@ class UIRenderer:
 
     def _draw_skeleton(self, canvas, landmarks, h: int, w: int, is_fall: bool):
         """绘制 MediaPipe Pose 骨架连线和关节点。"""
-        line_color  = COLOR_FALL  if is_fall else COLOR_SAFE
+        line_color = COLOR_FALL if is_fall else COLOR_SAFE
         joint_color = (0, 80, 220) if is_fall else (0, 191, 255)
+
+        # 【关键修复】支持 MediaPipe 的 NormalizedLandmarkList
+        if landmarks is None:
+            return
+        # MediaPipe 对象需要 .landmark 才能迭代（索引方式在 extractor.py 中已支持）
+        landmark_list = landmarks.landmark if hasattr(landmarks, 'landmark') else landmarks
 
         # 获取所有关键点像素坐标
         pts = {}
-        for idx, lm in enumerate(landmarks):
+        for idx, lm in enumerate(landmark_list):
             if lm.visibility >= 0.45:
                 pts[idx] = (int(lm.x * w), int(lm.y * h))
 
@@ -144,10 +150,10 @@ class UIRenderer:
             if i in pts and j in pts:
                 cv2.line(canvas, pts[i], pts[j], line_color, 2, cv2.LINE_AA)
 
-        # 绘制关节点（小圆形）
+        # 绘制关节点
         for pt in pts.values():
             cv2.circle(canvas, pt, 4, joint_color, -1, cv2.LINE_AA)
-            cv2.circle(canvas, pt, 4, COLOR_WHITE,  1,  cv2.LINE_AA)
+            cv2.circle(canvas, pt, 4, COLOR_WHITE, 1, cv2.LINE_AA)
 
     # ----------------------------------------------------------
     #  中文状态文字（Pillow 渲染）
