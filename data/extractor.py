@@ -99,8 +99,10 @@ class FeatureExtractor:
         # origin = 肩部Y坐标，作为参考原点
         # 站立时: shoulder_rel=0.0, hip_rel≈1.0, ankle_rel≈2.0
         # 跌倒时: shoulder_rel≈0.0 (参考点不变), hip_rel<0.6, 宽高比>1
-        scale  = max(hip_y_abs - shoulder_y_abs, 0.05)
-        origin = shoulder_y_abs
+        # ── 【关键修复】使用肩-髋欧式距离作为 scale（任何姿态下都稳定）──
+        torso_dist = math.hypot(hip_x - shoulder_x, hip_y_abs - shoulder_y_abs)
+        scale = max(torso_dist, 0.10)  # 最小 0.10，防止除0
+        origin = shoulder_y_abs  # 仍以肩部Y为原点（垂直方向）
 
         def rel(y_abs):
             """绝对Y → 相对Y（肩部为0，肩髋距离为单位1）"""
