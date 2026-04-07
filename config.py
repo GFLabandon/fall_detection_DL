@@ -48,7 +48,7 @@ LSTM_LAYERS         = 2
 LSTM_DROPOUT        = 0.3
 # v2: 0.55 → 0.75，消除 0.55~0.74 区间的近距上半身误报
 # 答辩演示时如需更灵敏可调回 0.65
-LSTM_FALL_THRESHOLD = 0.75
+LSTM_FALL_THRESHOLD = 0.82
 MODEL_WEIGHTS       = "weights/lstm_fall.pth"
 
 # ============================================================
