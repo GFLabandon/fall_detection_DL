@@ -46,9 +46,10 @@ FEATURE_DIM   = 12
 LSTM_HIDDEN         = 64
 LSTM_LAYERS         = 2
 LSTM_DROPOUT        = 0.3
-# v2: 0.55 → 0.75，消除 0.55~0.74 区间的近距上半身误报
-# 答辩演示时如需更灵敏可调回 0.65
-LSTM_FALL_THRESHOLD = 0.82
+# 演示版: 0.82 → 0.65，确保跌倒演示时LSTM通道能触发
+# （v2模型best epoch=30, val_acc=90.3%，置信度分布比第一次训练更分散）
+# 答辩后如需调整：0.70减少误报，0.60增加灵敏度
+LSTM_FALL_THRESHOLD = 0.65
 MODEL_WEIGHTS       = "weights/lstm_fall.pth"
 
 # ============================================================
@@ -62,7 +63,8 @@ STATIC_FALL_DURATION   = 5.0
 DYNAMIC_CONFIRM_FRAMES = 4
 # v2: 新增 B-Static 联合门控——几何触发时LSTM概率也必须 > 此值
 # 消除 lstm_prob=0.03 时的 B-Static 纯几何误报
-STATIC_LSTM_GATE       = 0.30
+# v2: B-Static联合门控（0.25比0.30更宽松，避免漏报）
+STATIC_LSTM_GATE       = 0.25
 CHECK_INTERVAL         = 0.35
 
 # ============================================================
