@@ -1,63 +1,64 @@
-# ===== Pycharm/IDE =====
+# ===== IDE & 系统文件 =====
 .idea/
 *.iml
 .vscode/
 *.swp
 *.swo
-
-# 数据集原始文件（体积过大）
-data/raw/
-data/processed/
-
-# 训练好的模型权重（体积过大，通过 train.py 本地生成）
-weights/
-*.pth
-weights/*.pt
-
-# ===== Python =====
-__pycache__/
-*.py[cod]
-*.so
-
-# ===== Virtual Env =====
-.venv/
-venv/
-env/
-ENV/
-
-# ===== OS =====
 .DS_Store
 .AppleDouble
 .LSOverride
 Thumbs.db
 
-# ===== Logs =====
-logs/
-*.log
-logs/*.csv
-logs/*.txt
-
-# ===== Env =====
-.env
-
-# ===== Models / Large Files =====
-*.task
-*.pt
-*.pth
-*.onnx
-
-# ===== Optional runtime data =====
-*.csv
-
-# Python 包元数据
+# ===== Python 缓存与环境 =====
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
 *.egg-info/
 *.egg
-dist/
-build/
 
-# Jupyter Notebook 检查点
-.ipynb_checkpoints/
+# ===== 数据集 & 媒体文件 (重点：防止大文件上传) =====
+data/
+data/raw/
+data/processed/
+dataset/
+*.jpg
+*.png
+*.mp4
+*.avi
+*.pkl
+*.npy
 
-# 临时文件
+# ===== 模型权重 (大文件) =====
+weights/
+models/
+*.pth
+*.pt
+*.task
+*.onnx
+*.h5
+*.pb
+*.tflite
+*.trt
+*.engine
+
+# ===== 日志 & 运行时文件 =====
+logs/
+*.log
 *.tmp
 *.bak
+.ipynb_checkpoints/
+
+# ===== 项目特定 & 环境变量 =====
+fall_det/
+.env
+.env.local
+.env.*.local
+
+# ===== 屏蔽所有 CSV (解决你刚才的 logs 冲突) =====
+*.csv
