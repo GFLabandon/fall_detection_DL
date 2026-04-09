@@ -1,56 +1,45 @@
-# ===== IDE / 编辑器 =====
+# ===== IDE & 系统文件 =====
 .idea/
 *.iml
 .vscode/
 *.swp
 *.swo
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
 
-# ===== Python 缓存 =====
+# ===== Python 缓存与环境 =====
 __pycache__/
 *.py[cod]
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# ===== 虚拟环境 =====
+.venv/
 venv/
 env/
 ENV/
-.venv/
+build/
+dist/
+*.egg-info/
+*.egg
 
-# ===== 操作系统 =====
-.DS_Store
-Thumbs.db
-*.DS_Store
+# ===== 数据集 & 媒体文件 (重点：防止大文件上传) =====
+data/
+data/raw/
+data/processed/
+dataset/
+*.jpg
+*.png
+*.mp4
+*.avi
+*.pkl
+*.npy
 
-# ===== 日志 & 临时文件 =====
-logs/
-*.log
-*.tmp
-
-# ===== 环境变量 =====
-.env
-.env.local
-.env.*.local
-
-# ===== 模型 / 大文件（重点！） =====
-*.task
-*.pt
+# ===== 模型权重 (大文件) =====
+weights/
+models/
 *.pth
+*.pt
+*.task
 *.onnx
 *.h5
 *.pb
@@ -58,17 +47,18 @@ logs/
 *.trt
 *.engine
 
-# ===== 数据集 & 运行时文件 =====
-data/
-dataset/
-*.csv
-*.jpg
-*.png
-*.mp4
-*.avi
+# ===== 日志 & 运行时文件 =====
+logs/
+*.log
+*.tmp
+*.bak
+.ipynb_checkpoints/
 
-# ===== 项目特定 =====
-models/          # 建议把模型全放在这里，不入库
-fall_det/        # 如果是虚拟环境文件夹
-*.pkl
-*.npy
+# ===== 项目特定 & 环境变量 =====
+fall_det/
+.env
+.env.local
+.env.*.local
+
+# ===== 屏蔽所有 CSV (解决你刚才的 logs 冲突) =====
+*.csv

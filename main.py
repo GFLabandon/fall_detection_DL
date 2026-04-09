@@ -1,279 +1,343 @@
-"""
-全时域居家安防：独居老人跌倒实时预警与状态分析器  v4.0
-DLCV 大作业最终版
+# fall_detection_DL/main.py
+# 跌倒检测系统主程序入口
+#
+# 使用流程：
+#   1. python data/preprocess.py   → 从 URFD 数据集提取特征（约 15 分钟）
+#   2. python train.py             → 训练 LSTM 分类器（约 3-8 分钟）
+#   3. python eval.py              → 查看 F1/混淆矩阵/消融实验
+#   4. python main.py              → 实时检测演示（本文件）
+#
+# 多线程架构：
+#   CaptureThread — 独立线程持续采集摄像头帧，放入 Queue
+#   主线程        — 从 Queue 取帧 → MediaPipe → LSTM → 渲染 → 显示
 
-项目目录结构：
-  fall_detection_DL/
-  ├── main.py                   ← 入口（多线程主循环）
-  ├── config.py                 ← 全局配置
-  ├── requirements.txt
-  ├── logs/
-  │   └── fall_events.csv       ← 跌倒事件日志（自动生成）
-  └── modules/
-      ├── temporal_classifier.py ← 时序特征分析器（DL Pipeline核心）
-      ├── detector.py            ← 三通道跌倒检测（A动态/B静态/C时序）
-      ├── renderer.py            ← UI渲染（中文+骨架+评分条）
-      ├── alarm.py               ← 本地语音报警（跨平台）
-      ├── email_alert.py         ← 邮件远程报警（配置后启用）
-      ├── logger.py              ← 事件日志+统计分析
-      └── font_utils.py          ← 中文字体加载
-
-核心技术架构（答辩口述）：
-  Input Video
-    → MediaPipe BlazePose [CNN+Transformer 预训练模型]
-        ↓ 33个关键点坐标
-    → TemporalFeatureExtractor [6维时序特征 · 30帧滑动窗口]
-        ↓ 特征矩阵 (30, 6)
-    → FallScoreClassifier [时序加权评分分类头]
-        ↓ 跌倒概率 0~1
-    ┌─── 通道C (时序) ────┐
-    │ 评分 > 0.60 → 报警  │  并行
-    └─────────────────────┘
-    ┌─── 通道A (动态) ────┐
-    │ 肩降+纵横比 → 报警  │  并行（快速跌倒）
-    └─────────────────────┘
-    ┌─── 通道B (静态) ────┐
-    │ 持续异常姿态 → 报警  │  并行（躺地不动）
-    └─────────────────────┘
-    → AlarmSystem [本地语音 + 邮件推送]
-    → EventLogger [CSV日志 + 统计分析]
-
-运行：
-  conda activate fall_det
-  python main.py
-
-按键：
-  ESC — 退出
-  R   — 重置报警状态
-  S   — 显示今日统计
-"""
-
+import os
 import sys
+import cv2
 import time
 import queue
 import threading
-import cv2
+
 import mediapipe as mp
+import numpy as np
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# 确保从项目根目录导入
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
-    CAMERA_INDEX, WINDOW_W, WINDOW_H, WINDOW_TITLE,
+    CAMERA_INDEX,
+    WINDOW_W,
+    WINDOW_H,
+    WINDOW_TITLE,
     MP_MODEL_COMPLEXITY,
-    MP_MIN_DETECTION_CONFIDENCE, MP_MIN_TRACKING_CONFIDENCE,
-    ALARM_COOLDOWN,
+    MP_MIN_DETECTION_CONFIDENCE,
+    MP_MIN_TRACKING_CONFIDENCE,
 )
-from modules.detector      import FallDetector, DetectionResult
-from modules.renderer      import Renderer
-from modules.alarm         import AlarmSystem
-from modules.logger        import EventLogger
-from modules.email_alert   import send_fall_alert
+from modules.detector    import FallDetector, DetectionResult
+from modules.renderer    import UIRenderer
+from modules.alarm       import AlarmSystem
+from modules.email_alert import send_fall_alert
+from modules.logger      import EventLogger
 
 
 # ============================================================
-#  多线程帧队列（生产者-消费者模式）
-#  采集线程 → frame_queue → 主推理线程
-#  解决 MediaPipe 推理阻塞导致的画面卡顿
+#  摄像头采集线程
 # ============================================================
+
 class CaptureThread(threading.Thread):
-    def __init__(self, cap, frame_queue: queue.Queue):
-        super().__init__(daemon=True)
-        self.cap   = cap
-        self.queue = frame_queue
-        self._stop = threading.Event()
+    """
+    独立线程持续从摄像头读帧，放入有界队列。
+
+    设计要点：
+      - Queue(maxsize=2) 保证队列内始终只有最新帧，防止延迟累积
+      - 队列满时丢弃旧帧（get_nowait + put），保持实时性
+      - 主线程通过 stop() → join() 优雅退出
+    """
+
+    def __init__(self, cap: cv2.VideoCapture, frame_queue: queue.Queue):
+        super().__init__(daemon=True)   # 守护线程，主线程退出时自动终止
+        self._cap      = cap
+        self._queue    = frame_queue
+        self._running  = True
 
     def run(self):
-        while not self._stop.is_set():
-            ret, frame = self.cap.read()
+        while self._running:
+            ret, frame = self._cap.read()
             if not ret:
+                # 读帧失败，短暂等待后重试（避免 CPU 空转）
                 time.sleep(0.05)
                 continue
-            # 只保留最新帧，丢弃积压（避免延迟累积）
-            if not self.queue.empty():
+
+            # 若队列已满，丢弃最旧帧，保持实时性
+            if self._queue.full():
                 try:
-                    self.queue.get_nowait()
+                    self._queue.get_nowait()
                 except queue.Empty:
                     pass
-            self.queue.put(frame)
+
+            self._queue.put(frame)
 
     def stop(self):
-        self._stop.set()
+        """请求线程停止。调用后应 join() 等待线程退出。"""
+        self._running = False
 
 
 # ============================================================
-#  主应用
+#  FPS 计算器
 # ============================================================
-class FallDetectionApp:
 
-    def __init__(self):
-        print("🚀 正在初始化系统...")
+class FPSCounter:
+    """
+    基于滑动窗口的 FPS 计算器。
+    记录最近 N 帧的时间戳，FPS = N / 时间跨度。
+    """
 
-        # MediaPipe
-        self.mp_pose = mp.solutions.pose
-        self.pose    = self.mp_pose.Pose(
-            model_complexity=MP_MODEL_COMPLEXITY,
-            enable_segmentation=False,
-            smooth_landmarks=True,
-            min_detection_confidence=MP_MIN_DETECTION_CONFIDENCE,
-            min_tracking_confidence=MP_MIN_TRACKING_CONFIDENCE,
-        )
+    def __init__(self, window: int = 30):
+        self._window    = window
+        self._timestamps = []
 
-        # 各模块
-        self.detector = FallDetector()
-        self.renderer = Renderer()
-        self.alarm    = AlarmSystem()
-        self.logger   = EventLogger()
+    def tick(self) -> float:
+        """
+        记录当前帧时间，返回当前 FPS 估计值。
+        """
+        now = time.time()
+        self._timestamps.append(now)
 
-        # FPS
-        self._fps_times = []
+        # 只保留最近 window 个时间戳
+        if len(self._timestamps) > self._window:
+            self._timestamps = self._timestamps[-self._window:]
 
-        print("✅ 系统初始化完成")
-        print("   按键：ESC=退出  R=重置报警  S=查看今日统计")
-        self._print_architecture()
+        if len(self._timestamps) < 2:
+            return 0.0
 
-    def _print_architecture(self):
-        print("""
-  ╔══════════════════════════════════════════════╗
-  ║  系统架构：三通道并行跌倒检测                 ║
-  ║  通道A: 动态（肩高骤降+纵横比）               ║
-  ║  通道B: 静态（持续异常姿态 3s）               ║
-  ║  通道C: 时序（6维特征×30帧 加权评分）         ║
-  ║  底层: MediaPipe BlazePose CNN+Transformer    ║
-  ╚══════════════════════════════════════════════╝
-        """)
+        # FPS = (帧数 - 1) / 时间跨度
+        span = self._timestamps[-1] - self._timestamps[0]
+        return (len(self._timestamps) - 1) / span if span > 1e-6 else 0.0
 
-    # ----------------------------------------------------------
-    #  主运行循环
-    # ----------------------------------------------------------
-    def run(self):
-        cap = cv2.VideoCapture(CAMERA_INDEX)
-        if not cap.isOpened():
-            print("❌ 无法打开摄像头！请检查摄像头权限（macOS→系统设置→隐私→摄像头）")
-            sys.exit(1)
 
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+# ============================================================
+#  主程序
+# ============================================================
 
-        cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW_TITLE, WINDOW_W, WINDOW_H)
+def print_banner(model_loaded: bool):
+    """打印启动 Banner，显示系统架构信息。"""
+    if model_loaded:
+        model_line = "✅ LSTM 模型已加载（详见上方初始化信息）"
+    else:
+        model_line = "⚠  LSTM 权重未找到，使用规则回退模式"
 
-        # 启动采集线程
-        frame_queue   = queue.Queue(maxsize=2)
-        capture_thread = CaptureThread(cap, frame_queue)
-        capture_thread.start()
-        print("📷 摄像头采集线程已启动（多线程模式）")
+    print()
+    print(model_line)
+    print()
+    print("  系统架构：")
+    print("    特征提取  MediaPipe BlazePose (CNN+Transformer，谷歌预训练)")
+    print("    分类器    LSTM 二分类 (自训练，URFD 数据集)" if model_loaded
+          else "    分类器    几何规则（回退模式）")
+    print("    备用通道  几何规则（肩高+纵横比+角度）")
+    print("    报警方式  本地语音 + SMTP 邮件")
+    print()
+    print("  按键：ESC=退出  R=重置报警  S=今日统计")
+    print()
 
-        last_fall_time   = 0.0
-        last_logged_time = 0.0
-        today_stats      = self.logger.get_today_stats()
-        stats_refresh_t  = time.time()
 
+def print_today_stats(logger: EventLogger):
+    """打印今日统计信息（按 S 键触发）。"""
+    stats = logger.get_today_stats()
+    print()
+    print("  ─── 今日跌倒统计 ───────────────")
+    print(f"  总计：{stats['total']} 次")
+    for ch, n in stats["by_channel"].items():
+        print(f"    {ch}: {n} 次")
+    print("  ────────────────────────────────")
+    print()
+
+
+def main():
+    print("🚀 正在初始化系统...")
+
+    # ---- 初始化 MediaPipe Pose ----
+    mp_pose = mp.solutions.pose.Pose(
+        static_image_mode       = False,   # 视频流模式（连续追踪）
+        model_complexity        = MP_MODEL_COMPLEXITY,
+        smooth_landmarks        = True,
+        enable_segmentation     = False,
+        min_detection_confidence= MP_MIN_DETECTION_CONFIDENCE,
+        min_tracking_confidence = MP_MIN_TRACKING_CONFIDENCE,
+    )
+
+    # ---- 初始化各功能模块 ----
+    # FallDetector 在 __init__ 内部自动尝试加载 LSTM 权重
+    detector = FallDetector()
+    renderer = UIRenderer()
+    alarm    = AlarmSystem()
+    logger   = EventLogger()
+    fps_ctr  = FPSCounter(window=30)
+
+    # 打印 Banner（使用 detector.model_loaded 判断权重是否加载成功）
+    print_banner(detector.model_loaded)
+
+    # ---- 打开摄像头 ----
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+    if not cap.isOpened():
+        print(f"❌ 摄像头无法打开（索引 {CAMERA_INDEX}）")
+        print("   请检查：")
+        print("   1. macOS → 系统设置 → 隐私与安全 → 摄像头，允许终端访问")
+        print("   2. config.py 中 CAMERA_INDEX 是否正确（默认 0 为内置摄像头）")
+        mp_pose.close()
+        sys.exit(1)
+
+    # 设置摄像头分辨率
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  WINDOW_W)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, WINDOW_H)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+
+    # ---- 创建显示窗口 ----
+    cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WINDOW_TITLE, WINDOW_W, WINDOW_H)
+
+    # ---- 启动摄像头采集线程 ----
+    frame_queue    = queue.Queue(maxsize=2)
+    capture_thread = CaptureThread(cap, frame_queue)
+    capture_thread.start()
+    print("✅ 摄像头采集线程已启动（多线程模式）")
+    print("✅ 系统初始化完成")
+
+    # ---- 运行状态变量 ----
+    session_fall_count = 0       # 本次运行检测到的跌倒次数
+    last_log_time      = 0.0     # 上次记录日志的时间（防止重复记录同一次跌倒）
+    LOG_COOLDOWN       = 10.0    # 日志记录冷却时间（秒），与报警冷却一致
+
+    try:
+        # ============================================================
+        #  主循环
+        # ============================================================
         while True:
-            # 从队列取帧（超时 0.5s）
+            # ── 取帧 ──────────────────────────────────────────────
             try:
-                frame = frame_queue.get(timeout=0.5)
+                frame = frame_queue.get(timeout=0.1)
             except queue.Empty:
-                print("⚠️  摄像头无响应，等待中...")
+                # 摄像头暂时无响应，继续等待
                 continue
 
-            # 镜像翻转
+            # 镜像翻转（投影仪演示友好，避免左右镜像混淆）
             frame = cv2.flip(frame, 1)
             h, w  = frame.shape[:2]
 
-            # FPS
-            now = time.time()
-            self._fps_times.append(now)
-            self._fps_times = [t for t in self._fps_times if now - t < 1.0]
-            fps = len(self._fps_times)
+            # ── FPS 计算 ──────────────────────────────────────────
+            fps = fps_ctr.tick()
 
-            # 刷新今日统计（每 30 秒）
-            if now - stats_refresh_t > 30:
-                today_stats     = self.logger.get_today_stats()
-                stats_refresh_t = now
-
-            # ---- MediaPipe 推理 ----
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            rgb.flags.writeable = False
-            pose_results = self.pose.process(rgb)
+            # ── MediaPipe 推理 ────────────────────────────────────
+            # BGR → RGB（MediaPipe 接受 RGB 格式）
+            rgb                 = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb.flags.writeable = False   # 避免不必要的数组复制
+            pose_results        = mp_pose.process(rgb)
             rgb.flags.writeable = True
 
-            # ---- 跌倒检测 ----
-            landmarks = None
-            result    = DetectionResult(status="no_person")
+            # 提取 landmarks 对象（可能为 None，即画面中无人）
+            landmarks_obj = pose_results.pose_landmarks
 
-            if pose_results.pose_landmarks:
-                landmarks = pose_results.pose_landmarks.landmark
-                result    = self.detector.update(landmarks, h, w)
-
-                if result.status in ("fall_dynamic", "fall_static", "fall_temporal"):
-                    last_fall_time = now
-
-                    # 触发本地语音报警
-                    self.alarm.trigger()
-
-                    # 记录日志（同一次跌倒只记录一次，冷却 10s）
-                    if now - last_logged_time > 10.0:
-                        last_logged_time = now
-                        self.logger.log_fall(
-                            channel       = result.channel,
-                            aspect_ratio  = result.aspect_ratio,
-                            body_angle    = result.body_angle,
-                            temporal_score= result.temporal_score,
-                        )
-                        # 发送邮件报警（EMAIL_ENABLED=True 时生效）
-                        send_fall_alert(
-                            channel       = result.channel,
-                            aspect_ratio  = result.aspect_ratio,
-                            body_angle    = result.body_angle,
-                            temporal_score= result.temporal_score,
-                        )
+            # ── 跌倒检测 ─────────────────────────────────────────
+            if landmarks_obj is not None:
+                # 将 landmarks 列表传入 detector
+                result = detector.update(
+                    landmarks_obj.landmark,   # landmark 列表（33个关键点）
+                    h, w,
+                )
             else:
-                self.detector.reset()
+                # 画面中无人，重置检测器状态
+                detector.reset()
+                result = DetectionResult(
+                    status="no_person",
+                    model_loaded=detector.model_loaded,
+                )
 
-            # 报警状态超时自动解除
-            alarm_active = self.alarm.is_active and (now - last_fall_time < ALARM_COOLDOWN)
-            if not alarm_active:
-                self.alarm.reset()
+            # ── 跌倒触发响应链 ────────────────────────────────────
+            is_fall = result.status in ("fall_lstm", "fall_dynamic", "fall_static")
+            if is_fall:
+                now = time.time()
 
-            # ---- 渲染 ----
-            frame = self.renderer.render(
-                frame        = frame,
-                result       = result,
-                landmarks    = landmarks,
-                fps          = fps,
-                alarm_active = alarm_active,
-                today_stats  = today_stats,
+                # 语音报警（内置冷却，trigger 返回 True 表示本次实际触发）
+                triggered = alarm.trigger()
+
+                # 日志记录（独立冷却，防止同一次跌倒重复写入 CSV）
+                if now - last_log_time >= LOG_COOLDOWN:
+                    last_log_time = now
+                    logger.log_fall(
+                        channel      = result.channel,
+                        aspect_ratio = result.aspect_ratio,
+                        body_angle   = result.body_angle,
+                        lstm_prob    = result.lstm_prob,
+                    )
+                    session_fall_count += 1
+
+                    # 邮件报警（仅在本次实际触发语音报警时发送，避免重复）
+                    if triggered:
+                        send_fall_alert(
+                            channel      = result.channel,
+                            aspect_ratio = result.aspect_ratio,
+                            body_angle   = result.body_angle,
+                            lstm_prob    = result.lstm_prob,
+                        )
+
+            # ── 渲染 ─────────────────────────────────────────────
+            today_stats = logger.get_today_stats()
+            rendered    = renderer.draw(
+                frame         = frame,
+                result        = result,
+                fps           = fps,
+                pose_landmarks= landmarks_obj,   # 可为 None（renderer 内部处理）
+                today_count   = today_stats["total"],
+                session_count = session_fall_count,
             )
 
-            cv2.imshow(WINDOW_TITLE, frame)
+            # ── 显示 ─────────────────────────────────────────────
+            cv2.imshow(WINDOW_TITLE, rendered)
 
-            # ---- 按键 ----
+            # ── 按键处理 ─────────────────────────────────────────
             key = cv2.waitKey(1) & 0xFF
-            if key == 27:                          # ESC → 退出
-                break
-            elif key in (ord('r'), ord('R')):      # R → 重置报警
-                self.alarm.reset()
-                self.detector.reset()
-                last_fall_time = 0.0
-                print("✅ 报警状态已手动重置")
-            elif key in (ord('s'), ord('S')):      # S → 今日统计
-                stats = self.logger.get_today_stats()
-                print(f"\n📊 今日统计 ({stats['date']})：")
-                print(f"   跌倒事件：{stats['fall_count']} 次")
-                print(f"   触发通道：{stats['by_channel']}")
-                print(f"   本次运行：{stats['session_count']} 次\n")
 
-        # ---- 清理 ----
+            if key == 27:   # ESC → 退出
+                print("\n  收到退出指令（ESC）...")
+                break
+
+            elif key in (ord('r'), ord('R')):   # R → 重置
+                detector.reset()
+                alarm.reset()
+                last_log_time = 0.0
+                print("  ✅ 系统已重置（检测器、报警冷却已清除）")
+
+            elif key in (ord('s'), ord('S')):   # S → 今日统计
+                print_today_stats(logger)
+
+    except KeyboardInterrupt:
+        print("\n  收到中断信号（Ctrl+C）...")
+
+    finally:
+        # ============================================================
+        #  优雅退出：释放所有资源
+        # ============================================================
+        print("\n  正在安全退出...")
+
+        # 停止采集线程
         capture_thread.stop()
+        capture_thread.join(timeout=2.0)
+
+        # 释放摄像头和窗口
         cap.release()
         cv2.destroyAllWindows()
-        self.pose.close()
-        print("\n" + self.logger.session_summary())
-        print("✅ 系统已安全关闭。")
+
+        # 关闭 MediaPipe
+        mp_pose.close()
+
+        # 打印本次运行摘要
+        print(logger.session_summary())
+        print("\n  👋 系统已安全退出")
 
 
 # ============================================================
 #  入口
 # ============================================================
 if __name__ == "__main__":
-    app = FallDetectionApp()
-    app.run()
+    main()

@@ -1,245 +1,308 @@
-# ============================================================
-#  modules/detector.py — 跌倒检测主控（三通道融合）
+# fall_detection_DL/modules/detector.py
+# 跌倒检测主控模块
 #
-#  通道A（动态）: 肩高骤降 + 纵横比 → 快速跌倒
-#  通道B（静态）: 纵横比/角度持续超标 N 秒 → 慢速/躺地
-#  通道C（时序）: 时序特征评分 > 阈值 → 深度学习置信输出
+# 架构：三通道融合决策
+#   通道 LSTM    : LSTMFallClassifier 实时推理（主通道，精度高）
+#   通道 A-Dynamic: 肩高骤降 + 纵横比（几何动态，检测快速跌倒）
+#   通道 B-Static : 异常姿态持续超标（几何静态，检测慢速倒地/躺地不动）
 #
-#  最终判定 = 三通道 OR 融合（任一通道确认即报警）
-# ============================================================
+# 优先级：LSTM > A-Dynamic > B-Static > warning_static > safe
+#
+# 回退机制：若 weights/lstm_fall.pth 不存在，自动切换为纯几何规则模式，
+#           保证 main.py 在未训练模型时也能正常运行。
+# 跌倒检测主控模块 - v2: B-Static 加入 LSTM 联合门控
 
 import math
+import os
+import sys
 import time
+import collections
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
+
+import numpy as np
+import torch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     VISIBILITY_THRESHOLD,
-    FALL_DROP_RATIO,
+    SEQUENCE_LEN,
+    FEATURE_DIM,
+    LSTM_HIDDEN,
+    LSTM_LAYERS,
+    LSTM_DROPOUT,
+    LSTM_FALL_THRESHOLD,
+    MODEL_WEIGHTS,
     ASPECT_RATIO_THRESHOLD,
     BODY_ANGLE_THRESHOLD,
+    FALL_DROP_RATIO,
     STATIC_FALL_DURATION,
     DYNAMIC_CONFIRM_FRAMES,
+    STATIC_LSTM_GATE,   # v2: 新增 B-Static 联合门控阈值
     CHECK_INTERVAL,
-    TEMPORAL_FALL_SCORE,
 )
-from modules.temporal_classifier import TemporalClassifier
-
-
-# ---- MediaPipe Pose 关键点索引 ----
-IDX_NOSE           = 0
-IDX_LEFT_SHOULDER  = 11
-IDX_RIGHT_SHOULDER = 12
-IDX_LEFT_ELBOW     = 13
-IDX_RIGHT_ELBOW    = 14
-IDX_LEFT_WRIST     = 15
-IDX_RIGHT_WRIST    = 16
-IDX_LEFT_HIP       = 23
-IDX_RIGHT_HIP      = 24
-IDX_LEFT_KNEE      = 25
-IDX_RIGHT_KNEE     = 26
-IDX_LEFT_ANKLE     = 27
-IDX_RIGHT_ANKLE    = 28
-
-SKELETON_CONNECTIONS: List[Tuple[int, int]] = [
-    (IDX_NOSE, IDX_LEFT_SHOULDER),
-    (IDX_NOSE, IDX_RIGHT_SHOULDER),
-    (IDX_LEFT_SHOULDER,  IDX_RIGHT_SHOULDER),
-    (IDX_LEFT_SHOULDER,  IDX_LEFT_ELBOW),
-    (IDX_LEFT_ELBOW,     IDX_LEFT_WRIST),
-    (IDX_RIGHT_SHOULDER, IDX_RIGHT_ELBOW),
-    (IDX_RIGHT_ELBOW,    IDX_RIGHT_WRIST),
-    (IDX_LEFT_SHOULDER,  IDX_LEFT_HIP),
-    (IDX_RIGHT_SHOULDER, IDX_RIGHT_HIP),
-    (IDX_LEFT_HIP,       IDX_RIGHT_HIP),
-    (IDX_LEFT_HIP,       IDX_LEFT_KNEE),
-    (IDX_LEFT_KNEE,      IDX_LEFT_ANKLE),
-    (IDX_RIGHT_HIP,      IDX_RIGHT_KNEE),
-    (IDX_RIGHT_KNEE,     IDX_RIGHT_ANKLE),
-]
+from data.extractor import FeatureExtractor
 
 
 @dataclass
 class DetectionResult:
-    status:           str   = "safe"   # safe|fall_dynamic|fall_static|fall_temporal|warning_static|insufficient|no_person
+    """
+    status 取值：
+      'safe' / 'fall_lstm' / 'fall_dynamic' / 'fall_static'
+      'warning_static' / 'insufficient' / 'no_person'
+    """
+    status:           str   = "safe"
+    lstm_prob:        float = 0.0
     aspect_ratio:     float = 0.0
     body_angle:       float = 0.0
-    drop_ratio:       float = 0.0
-    temporal_score:   float = 0.0      # 时序分类器输出的跌倒概率
     reason:           str   = ""
+    channel:          str   = ""
     confirm_progress: float = 0.0
-    channel:          str   = ""       # 触发通道标识，用于答辩演示
+    model_loaded:     bool  = False
 
 
 class FallDetector:
+    """
+    跌倒检测器，封装特征提取、LSTM 推理和几何规则三通道逻辑。
+    v2: B-Static 触发时增加 LSTM 概率联合确认门控，消除纯几何误报。
+    """
 
     def __init__(self):
+        self.extractor = FeatureExtractor(vis_threshold=VISIBILITY_THRESHOLD)
+        self._buffer   = collections.deque(maxlen=SEQUENCE_LEN)
+        self.device    = self._select_device()
+        self.model        = None
+        self.model_loaded = False
+        self._try_load_model()
+
         self._prev_shoulder_y:   Optional[float] = None
         self._dynamic_count:     int             = 0
-        self._static_start:      Optional[float] = None
+        self._static_start_time: Optional[float] = None
         self._last_check_time:   float           = 0.0
-        self._cached_result:     DetectionResult = DetectionResult(status="no_person")
+        self._last_geo_result:   Optional[dict]  = None
 
-        # 通道C：时序分类器
-        self.temporal = TemporalClassifier(vis_threshold=VISIBILITY_THRESHOLD)
+    def update(self, landmarks, frame_h: int, frame_w: int) -> DetectionResult:
+        feat = self.extractor.extract(landmarks)
 
-    # ----------------------------------------------------------
-    #  公开接口
-    # ----------------------------------------------------------
-    def update(self, landmarks, h: int, w: int) -> DetectionResult:
-        now = time.time()
-
-        # 时序分类器每帧都更新（保持滑动窗口连续）
-        t_score, t_ok = self.temporal.update(landmarks)
-
-        # 限频：几何检测每 CHECK_INTERVAL 秒一次
-        if now - self._last_check_time < CHECK_INTERVAL:
-            # 用上次几何结果合并最新时序分
-            r = self._cached_result
-            r.temporal_score = t_score
-            # 时序分数独立触发
-            if t_score >= TEMPORAL_FALL_SCORE and r.status not in ("fall_dynamic", "fall_static"):
-                r.status  = "fall_temporal"
-                r.channel = "C-Temporal"
-                r.reason  = f"时序评分: {t_score:.2f}"
-            return r
-
-        self._last_check_time = now
-        result = self._analyze(landmarks, h, w)
-        result.temporal_score = t_score
-
-        # 三通道 OR 融合：时序通道最高优先级
-        if t_score >= TEMPORAL_FALL_SCORE and result.status not in ("fall_dynamic", "fall_static"):
-            result.status  = "fall_temporal"
-            result.channel = "C-Temporal"
-            result.reason  = f"时序分类评分:{t_score:.2f}"
-
-        self._cached_result = result
-        return result
-
-    def reset(self):
-        self._prev_shoulder_y = None
-        self._dynamic_count   = 0
-        self._static_start    = None
-        self.temporal.reset()
-
-    # ----------------------------------------------------------
-    #  几何通道分析
-    # ----------------------------------------------------------
-    def _analyze(self, landmarks, h: int, w: int) -> DetectionResult:
-        ls  = self._get_norm(landmarks, IDX_LEFT_SHOULDER)
-        rs  = self._get_norm(landmarks, IDX_RIGHT_SHOULDER)
-        lhp = self._get_norm(landmarks, IDX_LEFT_HIP)
-        rhp = self._get_norm(landmarks, IDX_RIGHT_HIP)
-
-        if ls is None or rs is None:
-            self._reset_counters()
-            return DetectionResult(status="insufficient", reason="肩部不可见")
-
-        if lhp is None or rhp is None:
-            self._reset_counters()
-            return DetectionResult(status="insufficient", reason="髋部不可见，请后退使全身入画")
-
-        shoulder_y   = (ls[1] + rs[1]) / 2.0
-        aspect_ratio = self._calc_aspect_ratio(ls, rs, lhp, rhp, landmarks)
-        body_angle   = self._calc_body_angle(ls, rs, lhp, rhp)
-        drop_ratio   = self._calc_drop_ratio(shoulder_y)
-        self._prev_shoulder_y = shoulder_y
-
-        # ---- 通道A：动态 ----
-        dynamic_ok = (drop_ratio > FALL_DROP_RATIO and aspect_ratio > ASPECT_RATIO_THRESHOLD)
-        if dynamic_ok:
-            self._dynamic_count += 1
-        else:
-            self._dynamic_count = max(0, self._dynamic_count - 1)
-
-        confirm = min(self._dynamic_count / DYNAMIC_CONFIRM_FRAMES, 1.0)
-
-        if self._dynamic_count >= DYNAMIC_CONFIRM_FRAMES:
-            self._static_start = None
+        if feat is None:
+            self._reset_geo_state()
+            self._buffer.clear()
             return DetectionResult(
-                status="fall_dynamic", aspect_ratio=aspect_ratio,
-                body_angle=body_angle, drop_ratio=drop_ratio,
-                reason=f"肩降:{drop_ratio:.2f} 纵横比:{aspect_ratio:.2f}",
-                confirm_progress=1.0, channel="A-Dynamic"
+                status="insufficient",
+                reason="关键点不可见，请保持全身入画",
+                model_loaded=self.model_loaded,
             )
 
-        # ---- 通道B：静态 ----
-        static_abnormal = (aspect_ratio > ASPECT_RATIO_THRESHOLD or
-                           body_angle > BODY_ANGLE_THRESHOLD)
+        self._buffer.append(feat)
+        lstm_prob = self._lstm_infer()
+
         now = time.time()
-        if static_abnormal:
-            if self._static_start is None:
-                self._static_start = now
-            elapsed = now - self._static_start
-            if elapsed >= STATIC_FALL_DURATION:
+        if now - self._last_check_time >= CHECK_INTERVAL:
+            self._last_check_time = now
+            self._last_geo_result = self._geometry_detect(feat, now)
+
+        geo = self._last_geo_result or {
+            "status": "safe", "ar": 0.0, "angle": 0.0,
+            "progress": 0.0, "channel": ""
+        }
+
+        ar    = geo["ar"]
+        angle = geo["angle"]
+        prog  = geo["progress"]
+
+        # ── LSTM 主通道 ──────────────────────────────────────────
+        if lstm_prob >= LSTM_FALL_THRESHOLD:
+            return DetectionResult(
+                status="fall_lstm",
+                lstm_prob=lstm_prob,
+                aspect_ratio=ar,
+                body_angle=angle,
+                reason=f"LSTM 时序分类 P={lstm_prob:.2f}",
+                channel="LSTM",
+                confirm_progress=1.0,
+                model_loaded=self.model_loaded,
+            )
+
+        # ── A-Dynamic 通道 ───────────────────────────────────────
+        if geo["status"] == "fall_dynamic":
+            return DetectionResult(
+                status="fall_dynamic",
+                lstm_prob=lstm_prob,
+                aspect_ratio=ar,
+                body_angle=angle,
+                reason=geo.get("reason", "肩高骤降+纵横比超标"),
+                channel="A-Dynamic",
+                confirm_progress=1.0,
+                model_loaded=self.model_loaded,
+            )
+
+        # ── B-Static 通道（v2: 需要LSTM联合确认）────────────────
+        if geo["status"] == "fall_static":
+            if lstm_prob >= STATIC_LSTM_GATE:
+                # LSTM 也认可 → 真正报警
                 return DetectionResult(
-                    status="fall_static", aspect_ratio=aspect_ratio,
-                    body_angle=body_angle, drop_ratio=drop_ratio,
-                    reason=f"持续{elapsed:.1f}s 纵横比:{aspect_ratio:.2f} 角度:{body_angle:.0f}°",
-                    confirm_progress=1.0, channel="B-Static"
+                    status="fall_static",
+                    lstm_prob=lstm_prob,
+                    aspect_ratio=ar,
+                    body_angle=angle,
+                    reason=geo.get("reason", f"持续异常姿态 {STATIC_FALL_DURATION:.0f}s"),
+                    channel="B-Static",
+                    confirm_progress=1.0,
+                    model_loaded=self.model_loaded,
                 )
-            return DetectionResult(
-                status="warning_static", aspect_ratio=aspect_ratio,
-                body_angle=body_angle, drop_ratio=drop_ratio,
-                reason=f"姿态异常 {elapsed:.1f}/{STATIC_FALL_DURATION:.0f}s",
-                confirm_progress=elapsed / STATIC_FALL_DURATION,
-            )
-        else:
-            self._static_start = None
+            else:
+                # 几何触发但LSTM不认可 → 降级为warning，不报警不发邮件
+                # （这修复了 lstm_prob=0.03 时的 B-Static 误报）
+                return DetectionResult(
+                    status="warning_static",
+                    lstm_prob=lstm_prob,
+                    aspect_ratio=ar,
+                    body_angle=angle,
+                    reason=f"几何异常但LSTM不认可(P={lstm_prob:.2f}<{STATIC_LSTM_GATE})，继续观察",
+                    channel="",
+                    confirm_progress=1.0,
+                    model_loaded=self.model_loaded,
+                )
 
-        self._dynamic_count = max(0, self._dynamic_count - 1)
+        # ── 静态预警 ─────────────────────────────────────────────
+        if geo["status"] == "warning_static":
+            return DetectionResult(
+                status="warning_static",
+                lstm_prob=lstm_prob,
+                aspect_ratio=ar,
+                body_angle=angle,
+                reason=geo.get("reason", "姿态异常，持续确认中"),
+                channel="",
+                confirm_progress=prog,
+                model_loaded=self.model_loaded,
+            )
+
+        # ── 安全 ─────────────────────────────────────────────────
         return DetectionResult(
-            status="safe", aspect_ratio=aspect_ratio,
-            body_angle=body_angle, drop_ratio=drop_ratio,
-            reason=f"纵横比:{aspect_ratio:.2f} 角度:{body_angle:.0f}°",
-            confirm_progress=confirm,
+            status="safe",
+            lstm_prob=lstm_prob,
+            aspect_ratio=ar,
+            body_angle=angle,
+            reason=f"纵横比={ar:.2f}  角度={angle:.0f}°  LSTM_P={lstm_prob:.2f}",
+            channel="",
+            confirm_progress=0.0,
+            model_loaded=self.model_loaded,
         )
 
-    # ----------------------------------------------------------
-    #  特征计算
-    # ----------------------------------------------------------
-    def _calc_aspect_ratio(self, ls, rs, lhp, rhp, landmarks) -> float:
-        pts = [ls, rs, lhp, rhp]
-        for idx in (IDX_LEFT_KNEE, IDX_RIGHT_KNEE, IDX_LEFT_ANKLE, IDX_RIGHT_ANKLE):
-            p = self._get_norm(landmarks, idx)
-            if p:
-                pts.append(p)
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        bw = max(xs) - min(xs)
-        bh = max(ys) - min(ys)
-        return bw / bh if bh > 1e-4 else 0.0
+    def reset(self):
+        self._buffer.clear()
+        self.extractor.reset()
+        self._reset_geo_state()
 
-    @staticmethod
-    def _calc_body_angle(ls, rs, lhp, rhp) -> float:
-        sx = (ls[0] + rs[0]) / 2.0
-        sy = (ls[1] + rs[1]) / 2.0
-        hx = (lhp[0] + rhp[0]) / 2.0
-        hy = (lhp[1] + rhp[1]) / 2.0
-        dx, dy = hx - sx, hy - sy
-        ln = math.hypot(dx, dy)
-        if ln < 1e-4:
+    def _lstm_infer(self) -> float:
+        if self.model is None:
             return 0.0
-        return math.degrees(math.acos(min(1.0, abs(dy) / ln)))
+        buf_len = len(self._buffer)
+        if buf_len < SEQUENCE_LEN // 2:
+            return 0.0
+        buf_list = list(self._buffer)
+        if buf_len < SEQUENCE_LEN:
+            pad  = [buf_list[0]] * (SEQUENCE_LEN - buf_len)
+            seq  = pad + buf_list
+        else:
+            seq = buf_list
+        arr = np.stack(seq, axis=0)
+        x   = torch.tensor(arr, dtype=torch.float32).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            prob = self.model.predict_proba(x).item()
+        return float(prob)
 
-    def _calc_drop_ratio(self, shoulder_y: float) -> float:
-        if self._prev_shoulder_y is None or self._prev_shoulder_y < 1e-4:
-            return 1.0
-        return shoulder_y / self._prev_shoulder_y
+    def _geometry_detect(self, feat: np.ndarray, now: float) -> dict:
+        # feat[0] = shoulder_y_rel (≈0), feat[3] = aspect_ratio, feat[4] = body_angle_cos
+        # v2: 使用相对坐标后 shoulder_y_rel ≈ 0，改用 hip_y_rel (feat[1]) 判断骤降
+        hip_y_rel    = float(feat[1])
+        ar           = float(feat[3])
+        cos_val      = float(np.clip(feat[4], -1.0, 1.0))
+        body_angle   = math.degrees(math.acos(cos_val))
 
-    def _reset_counters(self):
-        self._dynamic_count = 0
-        self._static_start  = None
+        result = {"status": "safe", "ar": ar, "angle": body_angle,
+                  "progress": 0.0, "reason": "", "channel": ""}
 
-    @staticmethod
-    def _get_norm(landmarks, idx) -> Optional[Tuple[float, float]]:
-        lm = landmarks[idx]
-        return (lm.x, lm.y) if lm.visibility >= VISIBILITY_THRESHOLD else None
+        # A-Dynamic: 使用 delta_hip (feat[7]) 判断骤降，更稳健
+        delta_hip = float(feat[7])   # 负值=髋部在相对坐标下上升（跌倒初期）
+        # 相对坐标下骤降: delta_hip < -0.15（髋相对肩快速上升）且纵横比超标
+        if delta_hip < -0.15 and ar > ASPECT_RATIO_THRESHOLD:
+            self._dynamic_count += 1
+        else:
+            self._dynamic_count = 0
 
-    @staticmethod
-    def get_pixel(landmarks, idx, h: int, w: int) -> Optional[Tuple[int, int]]:
-        lm = landmarks[idx]
-        if lm.visibility < VISIBILITY_THRESHOLD:
-            return None
-        return int(lm.x * w), int(lm.y * h)
+        if self._dynamic_count >= DYNAMIC_CONFIRM_FRAMES:
+            result["status"]  = "fall_dynamic"
+            result["reason"]  = f"髋部骤降×{self._dynamic_count}帧 纵横比={ar:.2f}"
+            result["channel"] = "A-Dynamic"
+            self._static_start_time = None
+            return result
+
+        # B-Static
+        static_abnormal = (ar > ASPECT_RATIO_THRESHOLD or
+                           body_angle > BODY_ANGLE_THRESHOLD)
+
+        if static_abnormal:
+            if self._static_start_time is None:
+                self._static_start_time = now
+            elapsed  = now - self._static_start_time
+            progress = min(elapsed / STATIC_FALL_DURATION, 1.0)
+
+            if elapsed >= STATIC_FALL_DURATION:
+                result["status"]   = "fall_static"
+                result["reason"]   = (f"持续异常 {elapsed:.1f}s"
+                                      f"  纵横比={ar:.2f}  角度={body_angle:.0f}°")
+                result["channel"]  = "B-Static"
+                result["progress"] = 1.0
+            else:
+                result["status"]   = "warning_static"
+                result["reason"]   = (f"异常姿态 {elapsed:.1f}/{STATIC_FALL_DURATION:.0f}s"
+                                      f"  纵横比={ar:.2f}  角度={body_angle:.0f}°")
+                result["progress"] = progress
+        else:
+            self._static_start_time = None
+
+        return result
+
+    def _select_device(self) -> torch.device:
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+
+    def _try_load_model(self):
+        if not os.path.exists(MODEL_WEIGHTS):
+            print(f"⚠️  未找到 LSTM 权重 [{MODEL_WEIGHTS}]，使用几何规则回退模式")
+            return
+        try:
+            from models.lstm_classifier import LSTMFallClassifier
+            ckpt  = torch.load(MODEL_WEIGHTS, map_location=self.device)
+            cfg   = ckpt.get("config", {})
+            model = LSTMFallClassifier(
+                input_dim  = cfg.get("input_dim",  FEATURE_DIM),
+                hidden_dim = cfg.get("hidden_dim", LSTM_HIDDEN),
+                num_layers = cfg.get("num_layers", LSTM_LAYERS),
+                dropout    = cfg.get("dropout",    LSTM_DROPOUT),
+            ).to(self.device)
+            model.load_state_dict(ckpt["model_state"])
+            model.eval()
+            self.model        = model
+            self.model_loaded = True
+            n_params = model.count_parameters()
+            epoch    = ckpt.get("epoch", "?")
+            val_acc  = ckpt.get("val_acc", float("nan"))
+            print(f"✅ LSTM 模型已加载：{MODEL_WEIGHTS}")
+            print(f"   Epoch={epoch}  val_acc={val_acc*100:.1f}%"
+                  f"  参数量={n_params:,}  设备={self.device}")
+        except Exception as e:
+            print(f"⚠️  LSTM 加载失败 ({e})，使用几何规则回退模式")
+            self.model        = None
+            self.model_loaded = False
+
+    def _reset_geo_state(self):
+        self._prev_shoulder_y   = None
+        self._dynamic_count     = 0
+        self._static_start_time = None
+        self._last_geo_result   = None

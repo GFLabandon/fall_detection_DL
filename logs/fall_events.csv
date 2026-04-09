@@ -1,4 +1,0 @@
-timestamp,datetime,event_type,channel,aspect_ratio,body_angle,temporal_score,duration_s
-1774574984.867661,2026-03-27 09:29:44,FALL,B-Static,3.61,9.1,0.43,0.0
-1774575082.045127,2026-03-27 09:31:22,FALL,B-Static,1.75,3.5,0.34,0.0
-1774582299.680314,2026-03-27 11:31:39,FALL,B-Static,2.28,7.4,0.34,0.0
