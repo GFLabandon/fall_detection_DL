@@ -84,8 +84,11 @@ class FallDetector:
     # ── v3 几何保护参数 ──────────────────────────────────────
     # 仅当 ar 极小且 angle 极小（几何上明确是站立）时才激活保护
     # 不要调太宽，否则跌倒过渡帧会被错误屏蔽
-    _STANDING_AR_MAX    = 0.55   # 纵横比小于此值（人体细高）
-    _STANDING_ANGLE_MAX = 12.0   # 身体角度小于此值（几乎竖直）
+    # ── 站立保护门（仅屏蔽几何上明确为竖直站立的情形）──────────
+    # ar < 0.30（比人体正常宽高比更窄）且 angle < 5°（几乎完全竖直）
+    # 蹲坐地上时 ar ≈ 0.35~0.50，超出保护门，不会被屏蔽
+    _STANDING_AR_MAX    = 0.30   # 纵横比小于此值（人体细高）0.55 → 0.30  缩小站立保护门，避免蹲坐被误屏蔽
+    _STANDING_ANGLE_MAX = 5.0   # 身体角度小于此值（几乎竖直）12° → 5°   同上，只保护真正竖直站立的情形
 
     def __init__(self):
         self.extractor = FeatureExtractor(vis_threshold=VISIBILITY_THRESHOLD)
