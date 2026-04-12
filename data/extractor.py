@@ -12,28 +12,27 @@
 #       (shoulder_y≈0.55)存在约+0.25的绝对Y平移，导致站立被误判为跌倒。
 #       相对坐标消除此偏差: 任意距离下站立者 shoulder_rel=0, hip_rel≈1。
 # 注意: preprocess.py需重跑以用新特征重新训练模型。
+# v3 新增修复：
+#   - 倒置骨架过滤：body_angle_cos < -0.5（angle>120°）时返回 None
+#     效果：彻底消除背光/快速移动导致的倒置骨架误触发 B-Static
+#   - 保留 v2 的 Euclidean scale（欧氏距离）归一化方案
 
 import math
 import numpy as np
 from typing import Optional, Tuple
 
+IDX_NOSE           = 0
+IDX_LEFT_WRIST     = 15
+IDX_RIGHT_WRIST    = 16
+IDX_LEFT_SHOULDER  = 11
+IDX_RIGHT_SHOULDER = 12
+IDX_LEFT_HIP       = 23
+IDX_RIGHT_HIP      = 24
+IDX_LEFT_KNEE      = 25
+IDX_RIGHT_KNEE     = 26
+IDX_LEFT_ANKLE     = 27
+IDX_RIGHT_ANKLE    = 28
 
-# ============================================================
-#  MediaPipe Pose 关键点索引（33点模型）
-# ============================================================
-IDX_NOSE          = 0
-IDX_LEFT_WRIST    = 15
-IDX_RIGHT_WRIST   = 16
-IDX_LEFT_SHOULDER = 11
-IDX_RIGHT_SHOULDER= 12
-IDX_LEFT_HIP      = 23
-IDX_RIGHT_HIP     = 24
-IDX_LEFT_KNEE     = 25
-IDX_RIGHT_KNEE    = 26
-IDX_LEFT_ANKLE    = 27
-IDX_RIGHT_ANKLE   = 28
-
-# 参与包围盒计算的所有关键点索引
 _BBOX_INDICES = [
     IDX_LEFT_SHOULDER, IDX_RIGHT_SHOULDER,
     IDX_LEFT_HIP,      IDX_RIGHT_HIP,
@@ -41,14 +40,13 @@ _BBOX_INDICES = [
     IDX_LEFT_ANKLE,    IDX_RIGHT_ANKLE,
 ]
 
-# 特征向量各维度说明（FEATURE_DIM = 12）
 FEATURE_NAMES = [
     "shoulder_y_rel",   # 0  肩部相对Y（= 0.0，参考原点）
     "hip_y_rel",        # 1  髋部相对Y（站立≈1.0，躺下<0.5）
     "ankle_y_rel",      # 2  踝部相对Y（站立≈2.0+）
     "aspect_ratio",     # 3  人体关键点包围盒 宽/高
     "body_angle_cos",   # 4  身体轴线与竖直方向夹角余弦
-    "hip_shoulder_gap", # 5  髋-肩 Y 相对距离（= hip_y_rel，站立≈1.0）
+    "hip_shoulder_gap", # 5  髋-肩 Y 相对距离（站立≈1.0）
     "delta_shoulder",   # 6  肩高帧间变化（相对单位）
     "delta_hip",        # 7  髋高帧间变化（相对单位）
     "delta_angle",      # 8  角度余弦帧间变化
@@ -59,13 +57,19 @@ FEATURE_NAMES = [
 
 FEATURE_DIM = len(FEATURE_NAMES)  # 12
 
+# ── v3 新增常量 ──────────────────────────────────────────────
+# body_angle_cos < 此值时认为骨架倒置（angle > 120°），直接丢弃该帧
+# 正常跌倒最大角度约90°（cos≈0），躺平约85°~90°（cos≈0~0.09）
+# 120°以上（cos<-0.5）说明MediaPipe把肩髋位置搞反，必须过滤
+_INVERTED_COS_THRESHOLD = -0.5
+
 
 class FeatureExtractor:
     """
     从单帧 MediaPipe Pose landmarks 提取 12 维特征向量。
 
-    v2: 所有Y坐标改用以肩部为原点、肩髋距离为尺度的相对坐标，
-        消除摄像头距离导致的绝对Y坐标平移偏差（domain shift）。
+    v2: 所有Y坐标改用以肩部为原点、肩髋欧氏距离为尺度的相对坐标。
+    v3: 新增倒置骨架过滤（body_angle_cos < -0.5 → 返回 None）。
     """
 
     def __init__(self, vis_threshold: float = 0.45):
@@ -73,39 +77,55 @@ class FeatureExtractor:
         self._prev_shoulder_y: Optional[float] = None
         self._prev_hip_y:      Optional[float] = None
         self._prev_angle_cos:  Optional[float] = None
+        # v3: 追踪可见关键点数量，供 detector 判断骨架质量
+        self.last_visible_count: int = 0
 
     def extract(self, landmarks) -> Optional[np.ndarray]:
         """
         从单帧 landmarks 提取 FEATURE_DIM=12 维特征向量。
-        返回 None 当肩/髋不可见时。
+        以下情况返回 None（detector 将判定为 insufficient）：
+          1. 肩/髋不可见
+          2. v3新增：骨架倒置（body_angle_cos < -0.5）
         """
         ls  = self._get(landmarks, IDX_LEFT_SHOULDER)
         rs  = self._get(landmarks, IDX_RIGHT_SHOULDER)
         lhp = self._get(landmarks, IDX_LEFT_HIP)
         rhp = self._get(landmarks, IDX_RIGHT_HIP)
 
+        # 统计可见关键点数量
+        self.last_visible_count = sum(
+            1 for idx in _BBOX_INDICES
+            if landmarks[idx].visibility >= self.vis_thr
+        )
+
         if ls is None or rs is None or lhp is None or rhp is None:
             self._reset_prev()
             return None
 
-        # ---- 绝对坐标（仅用于计算，不直接入特征）----
+        # ---- 绝对坐标 ----
         shoulder_y_abs = (ls[1] + rs[1]) / 2.0
         shoulder_x     = (ls[0] + rs[0]) / 2.0
         hip_y_abs      = (lhp[1] + rhp[1]) / 2.0
         hip_x          = (lhp[0] + rhp[0]) / 2.0
 
-        # ── Domain-shift fix: 相对坐标归一化 ──────────────────────
-        # scale = 肩髋距离（Y方向），作为归一化尺度
-        # origin = 肩部Y坐标，作为参考原点
-        # 站立时: shoulder_rel=0.0, hip_rel≈1.0, ankle_rel≈2.0
-        # 跌倒时: shoulder_rel≈0.0 (参考点不变), hip_rel<0.6, 宽高比>1
-        # ── 【关键修复】使用肩-髋欧式距离作为 scale（任何姿态下都稳定）──
-        torso_dist = math.hypot(hip_x - shoulder_x, hip_y_abs - shoulder_y_abs)
-        scale = max(torso_dist, 0.10)  # 最小 0.10，防止除0
-        origin = shoulder_y_abs  # 仍以肩部Y为原点（垂直方向）
+        # ── v3: 先计算 body_angle_cos，倒置骨架提前返回 None ───────
+        # 用绝对坐标计算（在归一化之前），避免scale灾难
+        vx = hip_x - shoulder_x
+        vy = hip_y_abs - shoulder_y_abs
+        torso_dist = math.hypot(vx, vy)
+        scale = max(torso_dist, 0.10)
+        body_angle_cos = float(np.clip(vy / scale, -1.0, 1.0))
+
+        if body_angle_cos < _INVERTED_COS_THRESHOLD:
+            # 骨架倒置（angle > 120°）：MediaPipe检测失误，丢弃此帧
+            # 同时清空前帧状态，避免污染 delta 计算
+            self._reset_prev()
+            return None
+
+        # ── 相对坐标归一化 ────────────────────────────────────────
+        origin = shoulder_y_abs
 
         def rel(y_abs):
-            """绝对Y → 相对Y（肩部为0，肩髋距离为单位1）"""
             return (y_abs - origin) / scale
 
         # ---- 踝部 ----
@@ -118,7 +138,7 @@ class FeatureExtractor:
         elif ra is not None:
             ankle_y = rel(ra[1])
         else:
-            ankle_y = rel(hip_y_abs) + 1.2   # 踝估算：在髋下约1.2倍肩髋距离
+            ankle_y = rel(hip_y_abs) + 1.2
 
         # ---- 腕部 ----
         lw = self._get(landmarks, IDX_LEFT_WRIST)
@@ -130,7 +150,7 @@ class FeatureExtractor:
         elif rw is not None:
             wrist_y = rel(rw[1])
         else:
-            wrist_y = 0.0  # 腕不可见时用肩部相对位置
+            wrist_y = 0.0
 
         # ---- 膝部 ----
         lk = self._get(landmarks, IDX_LEFT_KNEE)
@@ -148,25 +168,20 @@ class FeatureExtractor:
         nose = self._get(landmarks, IDX_NOSE)
         nose_y = rel(nose[1]) if nose is not None else -0.5
 
-        # ---- 相对坐标版的shoulder_y和hip_y ----
+        # ---- 相对坐标的肩/髋 ----
         shoulder_y = rel(shoulder_y_abs)   # = 0.0（固定参考点）
         hip_y      = rel(hip_y_abs)        # ≈ 1.0 站立，< 0.5 跌倒
 
-        # ---- 特征 3：包围盒纵横比 ----
+        # ---- 包围盒纵横比 ----
         aspect_ratio = self._calc_aspect_ratio(landmarks)
 
-        # ---- 特征 4：身体轴线角度余弦 ----
-        body_angle_cos = self._calc_body_angle_cos(
-            shoulder_x, shoulder_y_abs, hip_x, hip_y_abs
-        )
+        # ---- 髋-肩高度差 ----
+        hip_shoulder_gap = abs(hip_y - shoulder_y)
 
-        # ---- 特征 5：髋-肩高度差（相对单位，站立≈1.0）----
-        hip_shoulder_gap = abs(hip_y - shoulder_y)   # = hip_y ≈ 1.0
-
-        # ---- 特征 6-8：帧间差分（相对单位）----
+        # ---- 帧间差分 ----
         if self._prev_shoulder_y is not None:
-            delta_shoulder = shoulder_y  - self._prev_shoulder_y
-            delta_hip      = hip_y       - self._prev_hip_y
+            delta_shoulder = shoulder_y     - self._prev_shoulder_y
+            delta_hip      = hip_y          - self._prev_hip_y
             delta_angle    = body_angle_cos - self._prev_angle_cos
         else:
             delta_shoulder = 0.0
@@ -177,18 +192,16 @@ class FeatureExtractor:
         self._prev_hip_y      = hip_y
         self._prev_angle_cos  = body_angle_cos
 
-        # ---- 特征 11：头-髋相对位置（相对坐标下，站立时nose_y<0<hip_y）----
-        # 使用相对坐标: 站立≈ (-0.5)/1.0 = -0.5, 跌倒时两者接近
+        # ---- 头-髋比 ----
         head_hip_ratio = nose_y / (hip_y + 1e-6)
 
-        # ---- 组装特征向量 ----
         feat = np.array([
-            shoulder_y,       # 0  ≈ 0.0 (参考点)
-            hip_y,            # 1  ≈ 1.0 站立
-            ankle_y,          # 2  ≈ 2.0+ 站立
+            shoulder_y,       # 0
+            hip_y,            # 1
+            ankle_y,          # 2
             aspect_ratio,     # 3
             body_angle_cos,   # 4
-            hip_shoulder_gap, # 5  ≈ 1.0 站立
+            hip_shoulder_gap, # 5
             delta_shoulder,   # 6
             delta_hip,        # 7
             delta_angle,      # 8
@@ -220,16 +233,6 @@ class FeatureExtractor:
         bbox_w = max(xs) - min(xs)
         bbox_h = max(ys) - min(ys)
         return bbox_w / (bbox_h + 1e-6)
-
-    @staticmethod
-    def _calc_body_angle_cos(sx, sy, hx, hy):
-        vx = hx - sx
-        vy = hy - sy
-        length = math.hypot(vx, vy)
-        if length < 1e-6:
-            return 1.0
-        cos_val = vy / length
-        return float(np.clip(cos_val, -1.0, 1.0))
 
     def _reset_prev(self):
         self._prev_shoulder_y = None
