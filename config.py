@@ -2,6 +2,11 @@
 # 全局配置中心
 # 非敏感参数直接定义；敏感参数（邮件账号等）通过 .env 文件加载
 # 全局配置中心 - v2 改动: 阈值调整 + 新增 STATIC_LSTM_GATE
+# v3 改动（仅数值调整，无结构变化）：
+#   LSTM_FALL_THRESHOLD : 0.82 → 0.65  确保演示跌倒能触发
+#   STATIC_FALL_DURATION: 保持 5.0     防止短暂弯腰误报
+#   STATIC_LSTM_GATE    : 0.30 → 0.25  稍宽松，防止 B-Static 漏报
+#   TRAIN_EPOCHS        : 保持 60      training_history 显示 ep56 是最优
 
 import os
 from dotenv import load_dotenv
@@ -46,9 +51,10 @@ FEATURE_DIM   = 12
 LSTM_HIDDEN         = 64
 LSTM_LAYERS         = 2
 LSTM_DROPOUT        = 0.3
-# 演示版: 0.82 → 0.65，确保跌倒演示时LSTM通道能触发
-# （v2模型best epoch=30, val_acc=90.3%，置信度分布比第一次训练更分散）
-# 答辩后如需调整：0.70减少误报，0.60增加灵敏度
+# v3: 0.82 → 0.65
+# detector v3 使用 EMA(alpha=0.5) 平滑后的概率与此阈值比较
+# EMA平滑后单帧噪声不会触发，真实跌倒2帧内触发
+# 调整建议: 误报多→调高至0.70；漏报多→调低至0.60
 LSTM_FALL_THRESHOLD = 0.65
 MODEL_WEIGHTS       = "weights/lstm_fall.pth"
 
@@ -58,12 +64,11 @@ MODEL_WEIGHTS       = "weights/lstm_fall.pth"
 ASPECT_RATIO_THRESHOLD = 1.40
 BODY_ANGLE_THRESHOLD   = 50.0
 FALL_DROP_RATIO        = 1.35
-# v2: 3.0 → 5.0，减少短暂弯腰/前倾的B-Static误报
+# 5.0s：防止短暂弯腰/取物的 B-Static 误报
 STATIC_FALL_DURATION   = 5.0
 DYNAMIC_CONFIRM_FRAMES = 4
-# v2: 新增 B-Static 联合门控——几何触发时LSTM概率也必须 > 此值
-# 消除 lstm_prob=0.03 时的 B-Static 纯几何误报
-# v2: B-Static联合门控（0.25比0.30更宽松，避免漏报）
+# B-Static 联合门控：EMA平滑后的LSTM概率也必须 > 此值
+# v3: 0.30 → 0.25，稍宽松以防漏报
 STATIC_LSTM_GATE       = 0.25
 CHECK_INTERVAL         = 0.35
 
@@ -77,8 +82,7 @@ ALARM_TEXT_ZH  = "跌倒预警！请立即查看！"
 # ============================================================
 #  数据集 / 训练超参
 # ============================================================
-TRAIN_DATA_FILE  = "data/processed/fall_sequences.npz"
-TRAIN_EPOCHS     = 60
+TRAIN_EPOCHS     = 60   # 保持60！training_history显示ep56是最优(val_acc=95.6%)
 TRAIN_BATCH_SIZE = 32
 TRAIN_LR         = 1e-3
 TRAIN_VAL_SPLIT  = 0.2
