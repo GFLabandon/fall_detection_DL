@@ -26,6 +26,8 @@ EMAIL_SMTP_PORT = int(os.getenv("EMAIL_SMTP_PORT", "465"))
 # ============================================================
 #  摄像头 / 窗口
 # ============================================================
+#摄像头索引，连接投影仪后笔记本摄像头的索引可能从 0 变成 1 或 2。提前运行命令确认：
+#python3 -c "import cv2; [print(f'index {i}:', cv2.VideoCapture(i).isOpened()) for i in range(4)]"
 CAMERA_INDEX  = 0
 WINDOW_W      = 1280
 WINDOW_H      = 720
