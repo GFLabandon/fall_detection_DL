@@ -87,8 +87,16 @@ class FallDetector:
     # ── 站立保护门（仅屏蔽几何上明确为竖直站立的情形）──────────
     # ar < 0.30（比人体正常宽高比更窄）且 angle < 5°（几乎完全竖直）
     # 蹲坐地上时 ar ≈ 0.35~0.50，超出保护门，不会被屏蔽
-    _STANDING_AR_MAX    = 0.30   # 纵横比小于此值（人体细高）0.55 → 0.30  缩小站立保护门，避免蹲坐被误屏蔽
-    _STANDING_ANGLE_MAX = 5.0   # 身体角度小于此值（几乎竖直）12° → 5°   同上，只保护真正竖直站立的情形
+    # 相比 v3.1 的唯一改动：
+    #   _STANDING_AR_MAX    : 0.30 → 0.45   （能屏蔽蹲坐背对误报）
+    #   _STANDING_ANGLE_MAX : 5.0 → 10.0    （配套调整）
+    # 改动逻辑：
+    #   蹲坐背对时 ar≈0.37 angle≈6° → 0.37<0.45 AND 6<10 → 屏蔽 ✓
+    #   正常站立时 ar≈0.28 angle≈4° → 0.28<0.45 AND 4<10  → 屏蔽 ✓
+    #   侧躺跌倒时 ar≈1.60 angle≈75° → ar>0.45           → 不屏蔽 ✓
+    #   俯身靠近时 ar≈0.80 angle≈5° → ar>0.45            → 不屏蔽（靠近本身就是问题，演示保持距离）
+    _STANDING_AR_MAX    = 0.45   # 纵横比小于此值（人体细高）0.55 →  缩小站立保护门，避免蹲坐被误屏蔽
+    _STANDING_ANGLE_MAX = 10.0   # 身体角度小于此值（几乎竖直）12° →    同上，只保护真正竖直站立的情形
 
     def __init__(self):
         self.extractor = FeatureExtractor(vis_threshold=VISIBILITY_THRESHOLD)
