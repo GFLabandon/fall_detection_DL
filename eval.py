@@ -16,6 +16,10 @@ import math
 
 import numpy as np
 import torch
+import matplotlib
+matplotlib.use("Agg")          # 无头模式，不弹窗
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -23,6 +27,8 @@ from sklearn.metrics import (
     f1_score,
     roc_auc_score,
     confusion_matrix,
+    roc_curve,
+    auc as sk_auc,
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -331,6 +337,12 @@ def evaluate():
         f.write(report)
         f.write("\n")
 
+    save_eval_plots(
+        y_true, y_pred_lstm, y_prob_lstm,
+        y_pred_rule, y_pred_fusion,
+        save_dir=LOG_DIR,
+    )
+
     print()
     print("=" * 60)
     print(f"  ✅ 评估完成，结果已保存至 {result_file}")
@@ -338,6 +350,110 @@ def evaluate():
     print("=" * 60)
     print()
 
+def save_eval_plots(y_true, y_pred_lstm, y_prob_lstm,
+                    y_pred_rule, y_pred_fusion,
+                    save_dir: str = "logs"):
+    """
+    生成并保存四张评估图：
+      1. 混淆矩阵热力图 (LSTM)
+      2. ROC 曲线
+      3. 消融实验 F1 柱状图
+      4. LSTM 概率分布直方图（正负样本分离）
+    所有图保存到 save_dir/，文件名含义明确。
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    plt.rcParams["font.family"] = "DejaVu Sans"  # 避免中文字体缺失报错
+    plt.rcParams["axes.unicode_minus"] = False
+
+    # ── 图1：混淆矩阵热力图 ──────────────────────────────────────
+    cm = confusion_matrix(y_true, y_pred_lstm, labels=[0, 1])
+    fig, ax = plt.subplots(figsize=(5, 4))
+    im = ax.imshow(cm, cmap="Blues", vmin=0)
+    fig.colorbar(im, ax=ax)
+    ax.set_xticks([0, 1]);
+    ax.set_xticklabels(["Pred Normal", "Pred Fall"])
+    ax.set_yticks([0, 1]);
+    ax.set_yticklabels(["True Normal", "True Fall"])
+    ax.set_title("LSTM Confusion Matrix (Test Set)", fontsize=13, pad=10)
+    labels = ["TN", "FP", "FN", "TP"]
+    for i in range(2):
+        for j in range(2):
+            val = cm[i, j]
+            color = "white" if val > cm.max() / 2 else "black"
+            ax.text(j, i, f"{labels[i * 2 + j]}\n{val}",
+                    ha="center", va="center", fontsize=14,
+                    fontweight="bold", color=color)
+    plt.tight_layout()
+    p1 = os.path.join(save_dir, "confusion_matrix.png")
+    fig.savefig(p1, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [图1] 混淆矩阵 → {p1}")
+
+    # ── 图2：ROC 曲线 ────────────────────────────────────────────
+    fpr_arr, tpr_arr, _ = roc_curve(y_true, y_prob_lstm)
+    roc_auc = sk_auc(fpr_arr, tpr_arr)
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.plot(fpr_arr, tpr_arr, color="#1f77b4", lw=2,
+            label=f"LSTM ROC (AUC = {roc_auc:.4f})")
+    ax.plot([0, 1], [0, 1], "k--", lw=1, label="Random classifier")
+    ax.set_xlim([0.0, 1.0]);
+    ax.set_ylim([0.0, 1.02])
+    ax.set_xlabel("False Positive Rate");
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC Curve — LSTM Fall Classifier", fontsize=13, pad=10)
+    ax.legend(loc="lower right")
+    plt.tight_layout()
+    p2 = os.path.join(save_dir, "roc_curve.png")
+    fig.savefig(p2, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [图2] ROC 曲线 → {p2}")
+
+    # ── 图3：消融实验 F1 柱状图 ──────────────────────────────────
+    from sklearn.metrics import f1_score
+    methods = ["A. Geometric\nRules", "B. LSTM\nOnly", "C. LSTM +\nRules"]
+    f1s = [
+        f1_score(y_true, y_pred_rule, zero_division=0),
+        f1_score(y_true, y_pred_lstm, zero_division=0),
+        f1_score(y_true, y_pred_fusion, zero_division=0),
+    ]
+    colors = ["#aec7e8", "#1f77b4", "#ffbb78"]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bars = ax.bar(methods, f1s, color=colors, edgecolor="white", width=0.55)
+    ax.set_ylim(0, 1.0)
+    ax.set_ylabel("F1 Score")
+    ax.set_title("Ablation Study: F1 Score Comparison", fontsize=13, pad=10)
+    for bar, val in zip(bars, f1s):
+        ax.text(bar.get_x() + bar.get_width() / 2.0,
+                bar.get_height() + 0.015,
+                f"{val:.2%}", ha="center", va="bottom", fontsize=11)
+    plt.tight_layout()
+    p3 = os.path.join(save_dir, "ablation_f1.png")
+    fig.savefig(p3, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [图3] 消融实验 F1 → {p3}")
+
+    # ── 图4：LSTM 概率分布直方图 ─────────────────────────────────
+    pos_probs = y_prob_lstm[y_true == 1]  # 真实跌倒的预测概率
+    neg_probs = y_prob_lstm[y_true == 0]  # 真实正常的预测概率
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(neg_probs, bins=20, range=(0, 1), alpha=0.65,
+            color="#aec7e8", label="Normal (label=0)", edgecolor="white")
+    ax.hist(pos_probs, bins=20, range=(0, 1), alpha=0.75,
+            color="#d62728", label="Fall (label=1)", edgecolor="white")
+    ax.axvline(x=0.65, color="black", linestyle="--", lw=1.5,
+               label="Threshold = 0.65")
+    ax.set_xlabel("LSTM Predicted Probability");
+    ax.set_ylabel("Sample Count")
+    ax.set_title("Probability Distribution: Fall vs Normal", fontsize=13, pad=10)
+    ax.legend()
+    plt.tight_layout()
+    p4 = os.path.join(save_dir, "prob_distribution.png")
+    fig.savefig(p4, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [图4] 概率分布 → {p4}")
+
+    print(f"\n  所有评估图已保存至 {save_dir}/")
+    return [p1, p2, p3, p4]
 
 if __name__ == "__main__":
     evaluate()
