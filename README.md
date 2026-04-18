@@ -235,7 +235,7 @@ Dropout(0.3) → Linear(64→32) → ReLU → Dropout(0.2) → Linear(32→1)
 输出: 跌倒概率 [0, 1]
 ```
 
-- **参数量**：~37,441（轻量，M2 上推理 < 5ms）
+- **参数量**：~55,361（轻量，M2 上推理 < 5ms）
 - **单向设计**：支持实时流式推理（双向 LSTM 需要完整序列）
 - **损失函数**：`BCEWithLogitsLoss(pos_weight=...)` 处理类别不均衡
 - **优化器**：Adam + CosineAnnealingLR + 梯度裁剪（max_norm=1.0）
