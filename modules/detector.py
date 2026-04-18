@@ -279,10 +279,10 @@ class FallDetector:
             seq = pad + buf_list
         else:
             seq = buf_list
-        arr = np.stack(seq, axis=0)
-        x   = torch.tensor(arr, dtype=torch.float32).unsqueeze(0).to(self.device)
+        arr = np.stack(seq, axis=0) #不足30帧就前填充
+        x   = torch.tensor(arr, dtype=torch.float32).unsqueeze(0).to(self.device) #转 tensor (1, 30, 12)
         with torch.no_grad():
-            prob = self.model.predict_proba(x).item()
+            prob = self.model.predict_proba(x).item() #输出概率
         return float(prob)
 
     # ----------------------------------------------------------
