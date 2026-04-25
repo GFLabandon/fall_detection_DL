@@ -1,5 +1,5 @@
 # fall_detection_DL/visualize.py
-# 训练曲线可视化工具（读取 logs/training_history.csv，生成 PNG 供答辩 PPT）
+# 训练曲线可视化工具（读取 logs/training_history.csv）
 
 import os
 import pandas as pd
