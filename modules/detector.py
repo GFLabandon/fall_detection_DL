@@ -286,7 +286,7 @@ class FallDetector:
         return float(prob)
 
     # ----------------------------------------------------------
-    #  几何检测（与 v2 一致，无改动）
+    #  几何检测
     # ----------------------------------------------------------
 
     def _geometry_detect(self, feat: np.ndarray, now: float) -> dict:
