@@ -116,7 +116,7 @@ fall_detection_DL/
 │
 ├── logs/
 │   ├── fall_events.csv         # 跌倒事件日志（运行时自动生成）
-│   └── training_history.csv    # 训练 Loss 记录（答辩 Loss 曲线数据源）
+│   └── training_history.csv    # 训练 Loss 记录（ Loss 曲线数据源）
 │
 └── modules/
     ├── detector.py             # FallDetector（三通道决策融合）
