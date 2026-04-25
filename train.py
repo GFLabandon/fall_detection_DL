@@ -9,7 +9,7 @@
 #
 # 训练产出：
 #   weights/lstm_fall.pth          — 最优 epoch 的模型权重
-#   logs/training_history.csv      — 每 epoch 的 loss/acc 记录（答辩 loss 曲线数据源）
+#   logs/training_history.csv      — 每 epoch 的 loss/acc 记录（ loss 曲线数据源）
 
 import os
 import sys
